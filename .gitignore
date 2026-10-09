@@ -1,0 +1,46 @@
+# Local environments and disposable Python build/cache output.
+/.venv/
+/venv/
+/build/
+/dist/
+/*.egg-info/
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# Default runtime storage, including accounts, local identities and tunnel pins.
+/data/
+/captures/
+/bootstrap/
+/logs/
+
+# Also cover recognized outputs when a custom directory is inside the checkout.
+*.sqlite3*
+*.pem
+*.key
+localip.crt
+localip.cer
+local-certificate.json
+local-menu-server.json
+local-menu-server.json.tmp
+remote-menu-invite.json
+remote-menu-invite.json.tmp
+server-pins.json
+server-pins.json.*.tmp
+known_hosts
+known_hosts.old
+
+# Opt-in wire/bootstrap/client captures can contain private session data.
+events.jsonl
+experiment.json
+summary.json
+bootstrap-*.jsonl
+client.jsonl
+client.stdout.log
+c2s.wire.bin
+s2c.wire.bin
+c2s.frames.bin
+s2c.frames.bin

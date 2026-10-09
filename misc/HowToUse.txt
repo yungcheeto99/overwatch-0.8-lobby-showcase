@@ -1,0 +1,167 @@
+OVERWATCH 0.8 SHOWCASE - HOW TO USE
+=================================
+
+SETUP
+-----
+Use Windows x64 with 64-bit Python 3.11 or newer and pip. Python installers:
+  https://www.python.org/downloads/windows/
+
+After installation, open a new PowerShell window and check:
+  python --version
+
+Each player also needs the complete Overwatch beta 0.8.0.24919 game client.
+Place the complete lobby folder directly inside your writable beta client
+folder, beside GameClientApp.exe. Keep all files and subfolders together.
+The showcase supports menus, accounts, friends, chat and parties, but no matches.
+
+Start-Server.bat and Start-Client.bat are in the lobby folder above this guide.
+Their first launch creates .venv and installs dependencies automatically; keep
+internet access available and let setup finish. No manual pip command is needed.
+To prepare without launching, open PowerShell in the lobby folder and run:
+  .\Start-Client.bat --setup-only
+
+HOSTING
+-------
+1. Double-click Start-Server.bat and choose your network:
+     1. This PC (default): for a local client.
+     2. LAN: for PCs on the same LAN; select your LAN IPv4.
+     3. Virtual LAN/VPN: automatically open a public gateway tunnel and
+        receive a randomly assigned public identifier. No VPN setup needed.
+2. After network selection, answer the extended-mode prompt (default: no).
+   Extended mode adds D.Va, Genji and Mei plus .herolevel commands (1..20).
+   Wait for "Server ready". Keep the server window open.
+3. In the separate server command window, create an account for each player:
+     .accountcreate PlayerName ChooseYourPassword
+   The response includes the player's BattleTag and native login alias.
+   Give each player their printed login alias and password privately. These
+   are project accounts; no real email or Battle.net account is needed.
+4. For LAN, share the printed IPv4 and allow inbound TCP 47325 through
+   the host firewall (see CONNECTION CHECK below). For Virtual LAN/VPN, share
+   the printed public identifier after the tunnel connects. Anyone with this
+   identifier can reach the gateway; there is no tunnel password or secret.
+
+Use a separate account for each player. Enter .help for server commands.
+Enter .serverip (or .ip) to show the current server address, LAN gateway port
+or latest public tunnel identifier to share with players.
+Ctrl+C in the server window stops the server.
+
+OTHER GAMES IN FRIENDS (BASELINE)
+--------------------------------
+For an existing account named Sam that is a friend of the logged-in player:
+  .login Sam
+  .game Sam hearthstone
+  .status Sam away
+  .game Sam None
+  .game Sam overwatch
+  .logoff Sam
+
+Enter .game without arguments to list Overwatch, Hearthstone, World of Warcraft,
+StarCraft II, Diablo III, Heroes of the Storm and None (Battle.net only).
+None shows the friend online on Battle.net without playing a game. Game names
+ignore case. This command is available without extended mode and changes only
+online synthetic players. Game selection resets on a new login.
+Native Invite/Join for other games does nothing; whispers
+and status still work. Custom activity text is unsupported: the beta expects
+downloaded localization templates. Quote account or game names containing spaces.
+
+JOINING
+-------
+1. Double-click Start-Client.bat.
+2. Press Enter to use the client folder one level above lobby, or enter
+   another game folder or GameClientApp.exe path.
+3. Choose your connection:
+     1. Local connection: this PC or another PC on the same LAN.
+     2. VPN connection: the host's automatic public gateway tunnel.
+4. Enter the host's printed IP or public tunnel identifier. For a local
+   connection to your own PC, use 127.0.0.1. To join your own virtual server,
+   choose VPN connection and enter its public identifier, just like a guest.
+5. Log in with the alias and password supplied by the host.
+
+Keep the client-launcher window open throughout the session.
+
+NATIVE TUNNEL FOR PCS ON DIFFERENT ROUTERS
+----------------------------------------
+The launchers handle tunneling automatically. Both PCs need internet access;
+the host also needs Windows OpenSSH Client (ssh.exe). If the launcher reports
+it missing, enable OpenSSH Client in Windows Optional Features and try again.
+No separate VPN installation or router port forwarding is needed.
+
+Use the hosting and joining steps above. Share the latest printed public
+identifier if it changes, and keep both launcher windows open. If the tunnel
+stops, restart the server and reconnect using the new identifier.
+
+CONNECTION CHECK
+----------------
+For LAN only, the host must allow inbound TCP 47325 from the intended
+guests. Virtual tunneling uses an outbound host connection instead. For LAN,
+run this in Administrator PowerShell on the host, replacing both example IPs:
+
+  New-NetFirewallRule -DisplayName "OW08 Showcase Gateway" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47325 -LocalAddress 192.168.1.10 -RemoteAddress 192.168.1.20 -Profile Any
+
+For several guests, use a comma-separated list after -RemoteAddress. 
+Update the rule if addresses change. To remove it later:
+  Remove-NetFirewallRule -DisplayName "OW08 Showcase Gateway"
+
+On the joiner, check the host's actual IPv4 and gateway port:
+  Test-NetConnection -ComputerName 192.168.1.10 -Port 47325
+
+Look for TcpTestSucceeded : True. If false, check the server is ready and the
+address, port and host firewall rule match. For virtual connections, check that
+both PCs have internet access and the host's public tunnel remains connected.
+
+USEFUL OPTIONS
+--------------
+Run these commands from PowerShell in the lobby folder. Replace example paths
+and IPs with your own. Each launcher prints a command to repeat connection settings.
+The server asks about extended mode again; --no-prompt uses standard mode.
+Default locations and relative path options resolve from the lobby code folder.
+
+List options:
+  .\Start-Server.bat --help
+  .\Start-Client.bat --help
+
+Launch directly:
+  .\Start-Server.bat --network virtual
+  .\Start-Client.bat --network virtual --game "C:\Games\Overwatch-0.8" --server-ip https://example.lhr.life
+
+Local/LAN connection:
+  .\Start-Server.bat --network lan --server-ip 192.168.1.10
+  .\Start-Client.bat --network local --game "C:\Games\Overwatch-0.8" --server-ip 192.168.1.10
+
+HTTPS or WSS identifiers supplied with --server-ip select virtual mode when
+--network is omitted. Plain IPv4 arguments retain the existing local/LAN behavior.
+
+Captures are off by default. Add --capture to save them under captures, or
+--capture "D:\Captures" for another location. Add --no-packet-log to reduce
+server output, or --no-command-window to enter commands in the server window.
+For LAN, use --remote-port on both launchers if changing the default gateway
+port. For a public tunnel, the printed identifier selects the public endpoint.
+
+If Python is not found, --python must be the first option:
+  .\Start-Client.bat --python "C:\Python314\python.exe" --setup-only
+
+If the server certificate changes, confirm the new TLS certificate SHA256
+with the host, then use --server-pin with that fingerprint to update your pin.
+
+CLEANUP
+-------
+The .gitignore covers normal generated environments, data and captures.
+
+Close the server, command window, game and client launchers first. Back up any
+accounts, keys or captures you want to keep outside the lobby folder.
+
+Double-click CleanUp.bat in this misc folder. It lists the generated items
+and asks you to type CLEAN before permanently deleting them.
+
+From PowerShell in the lobby folder:
+  .\misc\CleanUp.bat --dry-run   (preview without deleting)
+  .\misc\CleanUp.bat             (normal confirmation)
+  .\misc\CleanUp.bat --yes       (skip confirmation)
+
+Cleanup removes generated environments, data, captures, logs, Python caches,
+common build/cache folders and recognized runtime files. It keeps the source,
+launchers and misc files. Unknown custom outputs and locations outside the
+lobby folder are left alone; linked paths are refused.
+
+The next launch recreates the environment and data as needed. If the host's
+certificate is regenerated, previous joiners must verify its new fingerprint.
