@@ -172,7 +172,7 @@ class Parties:
                     await self.hub._deliver(actor, self.delivery(family, 1 if family == IN_PLAYER else 0,
                         body, 'party_view', view_revision=revision))
                 if group is not None and actor._shown_group != group:
-                    await self.hub._deliver(actor, self.delivery(IN_CHAT, 2, b'\0' + group,
+                    await self.hub._deliver(actor, self.delivery(IN_CHAT, 2, b'\x02' + group,
                         'party_view', view_revision=revision))
 
     async def flush(self):

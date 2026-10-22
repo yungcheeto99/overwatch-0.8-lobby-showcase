@@ -27,11 +27,73 @@ yellow announcement text; **type 1** is red error text. Keep the authenticated
 sender identity for ordinary messages: local sender IDs trigger the native
 client's local echo suppression.
 
-Joined-channel records contain three packed booleans before the channel;
-false flags permit input. Silent startup sends **20403**, while explicit
+Joined-channel records contain three packed booleans before the channel.
+General uses flags `00`; Group uses `02`, enabling the native voice capability
+while retaining text input. Silent startup sends **20403**, while explicit
 member requests use **20401**. The first welcome is delayed until the
 [player/party refresh](MENU_INITIALIZATION.md#player-party-and-delayed-welcome);
 pending shared messages follow it.
+
+## Voice preferences and channel visibility
+
+The player preferences reply **20802** (`912CEA67/2`) now enables the beta's
+native Team and Group voice controls and push-to-talk mode. Group visibility
+follows the current party. Team requires match membership; the showcase does
+not allocate matches. Preferences are per connection and reset on reconnect.
+
+The body is `f32 playback; f32 microphone; f32 other; six packed bools;
+array(player_audio_preference)`. JAM continues its bool run through nested
+structs. Bits 0/1 preserve the two audio preferences, bits 2/3 enable Team/Group,
+bit 4 enables push-to-talk, and bit 5 is the chat filter. The default flags byte
+is `1C`; an empty player-preference array gives a **17-byte** body.
+
+Client requests on `B7C5277C` update only their corresponding fields and receive
+a fresh 20802 reply:
+
+| Offset / ID | Body |
+| --- | --- |
+| 0 / 22200 | three finite f32 values; two packed bools; player-preference array |
+| 1 / 22201 | three packed bools: Team, Group, push-to-talk |
+| 2 / 22202 | one bool: chat filter |
+
+An array entry is three packed bools followed by an id16. The server accepts
+at most 128 entries and rejects reserved bits, truncated or trailing bytes,
+and nonfinite volumes before changing state. Other preference fields survive
+separate updates.
+
+Descriptors establish these layouts; receiver `C69859` copies bits 2/3/4 to
+self-player offsets `238/239/23A`, and Social receiver `DC08C0` gates the native
+channel rows on the Team/Group values. A native mono-server trial with the
+same Group join flags (`02`) displayed the original green microphone banner,
+"Joined party voice chat", followed by the client's configured talk/channel
+key hints. The native client emits this banner before Vivox session success.
+The Python port sends equivalent bytes; a separate native Python trial has not
+been performed. The original Vivox network session backend remains unimplemented.
+
+Held push-to-talk names use a small metadata companion in the existing owned
+client launcher. Its authenticated control connection reports the original
+native selected channel and configured PTT input every 100 ms. The hub derives
+Group membership from the current party and admitted account lease; a client
+cannot select another sender or supply a roster. Hold reports expire after
+500 ms, and disconnection clears the report. The native voice participant cache
+includes self and peers with a fresh selected Group report, including idle peers;
+opted-out and expired peers stay out of that cache. The normal Group list keeps
+its full membership. Peer profile names use the original 31800 cache message when
+the selected peer identity or desired portrait changes. Nonfriend profiles carry
+portrait GUID zero, which the native renderer clears to an empty icon; existing
+friends retain their actual portrait. Removing a friendship republishes the same
+peer with portrait zero. No friend relation or presence is created.
+
+The companion validates the supported executable and owned child, and borrows
+only an empty native inline participant cache while the SDK is failed. When
+negotiated, the launcher defaults the obsolete SDK connector to the closed local
+endpoint `http://127.0.0.1:1/api2`; an explicit `extra_args` voiceChatServer
+option takes precedence for SDK research. It writes
+at most sixteen existing 96-byte records and restores its bytes when the
+channel changes, snapshots expire or the launcher stops. It does not allocate
+native memory, replace a DLL, change executable code or alter SDK connection
+state. Group is the only showcase channel; Team still requires the mono match
+runtime. No microphone is captured and no voice audio is transmitted.
 
 ## Friend tells and completion tokens
 

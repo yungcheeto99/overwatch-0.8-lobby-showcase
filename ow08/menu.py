@@ -17,6 +17,7 @@ from .portrait import DEFAULT_PORTRAIT
 from .heroes import (IN_HERO_PROGRESSION, beta_hero_catalog, beta_hero_preload,
                      menu_heroes, normalize_menu_hero)
 from .protocol import ProtocolError
+from .voice import VoicePreferences
 
 IN_PLAYER = 0x912CEA67
 OUT_PLAYER = 0xB7C5277C
@@ -132,6 +133,7 @@ class MenuLobby:
         self.session = session
         self.settings = validate_menu(settings)
         self.logged_in = False
+        self.voice_preferences = VoicePreferences()
         self.channels = set()
         self.announced = False
         self.account = ACCOUNT
@@ -179,7 +181,7 @@ class MenuLobby:
             party = party_record(self.settings["name"], self.account, self.party,
                                  portrait_guid=self.portrait_guid)
         await self.send(IN_PLAYER, 1, player)
-        await self.send(IN_PLAYER, 2, struct.pack("<fff", 1, 1, 1) + bytes(5))
+        await self.send(IN_PLAYER, 2, self.voice_preferences.encode())
         await self.send(IN_PARTY, 0, party)
         if self.actor:
             await self.hub.initialize_friends(self.actor, self.send)
@@ -254,6 +256,9 @@ class MenuLobby:
             await self.party_request(offset, body)
         elif family == OUT_FRIENDS:
             await self.friend_request(offset, body)
+        elif family == OUT_PLAYER and offset in (0, 1, 2):
+            self.voice_preferences = self.voice_preferences.apply(offset, body)
+            await self.send(IN_PLAYER, 2, self.voice_preferences.encode())
         elif family == OUT_PLAYER:
             self.session.capture.event("menu_request", family="player", offset=offset, body_hex=body.hex())
         elif family in (OUT_CUSTOM_GAME, OUT_MATCHMAKING):
@@ -305,7 +310,7 @@ class MenuLobby:
             elif kind == 4 and self.actor is not None:
                 groups = [channel for channel in self.actor.channels if channel[:4] == struct.pack("<i", 4)]
                 for channel in groups:
-                    await self.send(IN_CHAT, 2, b"\x00" + channel)
+                    await self.send(IN_CHAT, 2, b"\x02" + channel)
             else:
                 self.session.capture.event("menu_request", family="chat", offset=offset, body_hex=body.hex())
         elif offset in (0, 1, 3):

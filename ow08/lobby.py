@@ -93,6 +93,11 @@ class Actor:
     _party_id: bytes | None = None
     _party_revision: int = 0
     _shown_group: bytes | None = None
+    _voice_kind: int = 0
+    _voice_speaking: bool = False
+    _voice_party_id: bytes | None = None
+    _voice_expires: float = 0
+    _voice_profiles: frozenset = field(default_factory=frozenset, repr=False)
     _ready: bool = False
     _active: bool = True
     _presence_status: str = "online"
@@ -859,6 +864,58 @@ class LobbyHub:
     async def party_promote(self, actor, target_root):
         await self.record_activity(actor)
         return await self._parties.member_action(actor, target_root, promote=True)
+
+    async def voice_poll(self, actor, kind, speaking):
+        """Authenticated hold metadata and a current Group roster; no audio."""
+        if type(kind) is not int or kind not in (0, 4, 5) or type(speaking) is not bool:
+            raise ProtocolError("invalid voice metadata report")
+        async with self._lock:
+            if (not actor._active or self._actors.get(actor.account_id) is not actor
+                    or not self.is_current(actor.lease)):
+                return None
+            actor._voice_kind, actor._voice_speaking = 0, False
+            actor._voice_party_id, actor._voice_expires = None, 0
+            if not actor.ready or actor.game != "overwatch":
+                return None
+            party = self._parties._party(actor)
+            channels, peers = [], []
+            if len(party.members) > 1 and party.channel in actor._channels:
+                now = self.clock()
+                if kind == 4:
+                    actor._voice_kind, actor._voice_speaking = kind, speaking
+                    actor._voice_party_id = party.identity
+                    actor._voice_expires = now + .5
+                selected = [member for member in party.members
+                            if member._active and member.ready and member.game == "overwatch"
+                            and self.is_current(member.lease)
+                            and (member is actor or (member._voice_kind == 4
+                                 and member._voice_party_id == party.identity
+                                 and member._voice_expires > now))]
+                if len(selected) > 16:
+                    selected = []
+                members = [{"account_id": member.account_id.hex(),
+                            "speaking": member._voice_speaking} for member in selected]
+                for member in selected:
+                    if member is actor:
+                        continue
+                    account = self._profile_account(member)
+                    portrait = (getattr(account, "portrait_guid", DEFAULT_PORTRAIT)
+                                if member.account_id in actor._friend_metadata else 0)
+                    peers.append(SimpleNamespace(account_id=member.account_id,
+                                 display_name=account.display_name, portrait_guid=portrait))
+                channels.append({"kind": 4, "identity": party.identity.hex(), "members": members})
+            snapshot = {"account_id": actor.account_id.hex(), "channels": channels}
+            identities = frozenset((peer.account_id, peer.portrait_guid) for peer in peers)
+            refresh = identities != actor._voice_profiles
+            revision = actor._party_revision
+        # Original speaking HUD resolves peer names through the profile cache;
+        # this does not add friend relations or presence records.
+        if refresh and await self._deliver(actor, Delivery(IN_FRIEND_PROFILES, 0,
+                friends_profile_state(peers), "voice_profiles", view_revision=revision)):
+            async with self._lock:
+                if actor._active and actor._party_revision == revision:
+                    actor._voice_profiles = identities
+        return snapshot
 
     async def group(self, actor, message):
         _text(message)

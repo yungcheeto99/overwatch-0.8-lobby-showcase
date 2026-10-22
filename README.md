@@ -12,6 +12,7 @@ This showcase builds on public Overwatch preservation research and shares its fi
 - Local accounts with password login and saved account/social data.
 - General chat, member lists, friends, favorites, presence and direct tells.
 - Party invitations, joining/leaving, kicking, leader transfer and group chat.
+- Native Group voice controls and held push-to-talk name indicators, without audio.
 - Saved portraits, hero levels, optional Real ID display labels and online/away/busy status.
 - Administrative dot commands and synthetic players for trying social features.
 - Baseline `.game` presence for Hearthstone, WoW, StarCraft II, Diablo III, Heroes of the Storm and Battle.net only.

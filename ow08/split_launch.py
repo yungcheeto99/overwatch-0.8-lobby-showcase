@@ -22,7 +22,7 @@ import threading
 
 from .bootstrap import BootstrapServer, DEFAULT_CERT, DEFAULT_KEY
 from .client import (ClientLaunchError, launch_client, prepare_lobby_rsa, prepare_tls_patches,
-                     restore_login_patches, restore_tls_patches, stop_client)
+                     restore_login_patches, restore_tls_patches, stop_client, validate_extra_args)
 from .certificate import prepare_project_certificate, certificate_is_windows_trusted
 from .local_rsa import DEFAULT_LOCAL_KEY, load_or_generate_local_key, local_modulus_le
 from .packet_log import colorize, console_color
@@ -78,11 +78,12 @@ class ClientConnection:
     relay: object = None
     gateway_ports: dict | None = None
     capability: str | None = None
+    voice_actor: object = None
 
 
 class Coordinator:
     def __init__(self, gate, modulus, bnet_endpoint, rsa_only=False, registry=None, admissions=None,
-                 *, web_endpoint=None, lobby_endpoint=None):
+                 *, web_endpoint=None, lobby_endpoint=None, hub=None):
         self.gate, self.modulus, self.bnet_endpoint = gate, modulus, bnet_endpoint
         self.rsa_only = rsa_only
         self.token = secrets.token_hex(32)
@@ -90,6 +91,7 @@ class Coordinator:
         self.tasks = set()
         self.registry = registry
         self.admissions = admissions
+        self.hub = hub
         self.clients = {}
         self.web_endpoint, self.lobby_endpoint = web_endpoint, lobby_endpoint
         self.on_remote_disconnect = None
@@ -158,6 +160,7 @@ class Coordinator:
             await send(writer, event="launch", bnet_endpoint=endpoint,
                        modulus_le=self.modulus.hex(), rsa_only=self.rsa_only,
                        force_credentials=self.registry is not None,
+                       voice_metadata=self.hub is not None,
                        **({"capability": connection.capability} if remote else {}))
             while True:
                 message = await receive(reader)
@@ -196,12 +199,23 @@ class Coordinator:
                             and connection.rsa_preparation is not None
                             and not connection.rsa_preparation.done()):
                         connection.rsa_preparation.set_result(True)
+                elif message.get("event") == "voice-poll":
+                    kind, speaking = message.get("kind"), message.get("speaking")
+                    if type(kind) is not int or kind not in (0, 4, 5) or type(speaking) is not bool:
+                        raise ValueError("Invalid voice metadata report")
+                    snapshot = None
+                    if self.hub is not None and connection.voice_actor is not None:
+                        snapshot = await self.hub.voice_poll(connection.voice_actor, kind, speaking)
+                    await send(writer, event="voice-state", snapshot=snapshot)
                 else:
                     raise ValueError("Unexpected client launcher message")
         except (ConnectionError, OSError, ValueError, TimeoutError) as error:
             if connection:
                 print(f"Client launcher disconnected: {error}", flush=True)
         finally:
+            if connection is not None and self.hub is not None and connection.voice_actor is not None:
+                with suppress(Exception):
+                    await self.hub.voice_poll(connection.voice_actor, 0, False)
             if connection is not None and connection.relay is not None:
                 self.clients.pop(connection.launcher_id, None)
                 if connection.capability is not None and self.on_remote_disconnect is not None:
@@ -271,6 +285,10 @@ class Coordinator:
                 # Stop this launch rather than release another preparation.
                 connection.writer.close()
                 raise
+            if self.hub is not None and session is not None:
+                actor = getattr(getattr(session, "menu", None), "actor", None)
+                if actor is not None and actor.lease is session.lease:
+                    connection.voice_actor = actor
         changed = "RSA modulus" if self.rsa_only else "TLS/RSA bytes"
         print(f"Original {changed} restored after encrypted channel acceptance.", flush=True)
 
@@ -532,7 +550,7 @@ async def _run_server(args, certificate, runtime, accounts=None, admissions=None
     try:
         bootstrap.start()
         coordinator = Coordinator(gate, local_modulus_le(key), f"127.0.0.1:{bootstrap.port}",
-                                  args.rsa_only, registry, admissions,
+                                  args.rsa_only, registry, admissions, hub=hub,
                                   **({"web_endpoint": ("127.0.0.1", bootstrap.web_port),
                                       "lobby_endpoint": ("127.0.0.1", args.port)}
                                      if remote_host is not None else {}))
@@ -750,7 +768,8 @@ async def run_client(args):
     else:
         print("Connecting to the local server...", flush=True)
         reader, writer, welcome = await connect_server(args.state)
-    child = launcher = receiver = None
+    child = launcher = receiver = voice_task = voice_adapter = None
+    voice_snapshot, voice_received = None, 0
     tls_ready = asyncio.get_running_loop().create_future()
     loop = asyncio.get_running_loop()
     closing = threading.Event()
@@ -768,6 +787,29 @@ async def run_client(args):
             directory.mkdir(parents=True)
         print(f"Client captures: {directory or 'disabled'}", flush=True)
 
+        voice_enabled = welcome.get("voice_metadata", False)
+        if type(voice_enabled) is not bool:
+            raise ClientLaunchError("Invalid voice metadata capability from server")
+        client_arguments = validate_extra_args(getattr(args, "extra_args", None))
+        if voice_enabled and not any(argument.split("=", 1)[0].casefold() == "--voicechatserver"
+                                     for argument in client_arguments):
+            # Fail the obsolete SDK connector locally before borrowing its idle
+            # participant cache. An explicit research endpoint takes precedence.
+            client_arguments.append("--voiceChatServer=http://127.0.0.1:1/api2")
+
+        async def voice_updates():
+            nonlocal voice_adapter
+            from .voice_native import NativeVoiceMetadata
+            await asyncio.shield(tls_ready)
+            while True:
+                if child is not None and child.process.poll() is None:
+                    if voice_adapter is None:
+                        voice_adapter = NativeVoiceMetadata(child, args.game)
+                    snapshot = voice_snapshot if loop.time() - voice_received <= .5 else None
+                    report = voice_adapter.update(snapshot) or {"kind": 0, "speaking": False}
+                    await asyncio.wait_for(send(writer, event="voice-poll", **report), .5)
+                await asyncio.sleep(.1)
+
         def started(result):
             nonlocal child
             child = result
@@ -783,6 +825,7 @@ async def run_client(args):
             asyncio.run_coroutine_threadsafe(patched_message(), loop).result(CONTROL_TIMEOUT + 1)
 
         async def control_messages():
+            nonlocal voice_snapshot, voice_received
             tls_cycle = 0
             tls_prepared = False
             rsa_cid = None
@@ -829,21 +872,34 @@ async def run_client(args):
                     await asyncio.to_thread(prepare_lobby_rsa, child, args.game)
                     rsa_cid = cid
                     await send(writer, event="rsa-prepared", cid=cid)
+                elif message.get("event") == "voice-state" and voice_enabled:
+                    snapshot = message.get("snapshot")
+                    if snapshot is not None and not isinstance(snapshot, dict):
+                        raise ClientLaunchError("Invalid voice metadata snapshot")
+                    voice_snapshot, voice_received = snapshot, loop.time()
                 else:
                     raise ClientLaunchError("Unexpected server control message")
 
         receiver = asyncio.create_task(control_messages())
         launcher = asyncio.create_task(asyncio.to_thread(
             launch_client, args.game, welcome["bnet_endpoint"], not rsa_only,
-            directory / "client.jsonl" if directory else None, args.observe_seconds, patch_phases=(1,),
+            directory / "client.jsonl" if directory else None, args.observe_seconds,
+            extra_args=client_arguments, patch_phases=(1,),
             on_started=started, on_patch_ready=patched, local_rsa_modulus=modulus, rsa_only=rsa_only,
             force_credentials=force_credentials))
-        done, _ = await asyncio.wait((launcher, receiver), return_when=asyncio.FIRST_COMPLETED)
+        if voice_enabled:
+            voice_task = asyncio.create_task(voice_updates())
+        watched = (launcher, receiver, voice_task) if voice_task is not None else (launcher, receiver)
+        done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+        if voice_task is not None and voice_task in done:
+            await voice_task
         if receiver in done:
             await receiver
         result = await asyncio.shield(launcher)
         print("Leave this window open while using the client. Ctrl+C stops this client.", flush=True)
         while result.returncode is None:
+            if voice_task is not None and voice_task.done():
+                await voice_task
             if receiver.done():
                 await receiver
             await asyncio.sleep(0.25)
@@ -853,23 +909,34 @@ async def run_client(args):
         # Stop only our child, including one still being patched by the worker.
         closing.set()
         tls_ready.cancel()
-        if child:
-            await asyncio.to_thread(stop_client, child.process)
-        if launcher:
-            # A cancelled patch-ready future can surface through the worker.
-            # It must not skip receiver, transport or owned-child cleanup.
+        if voice_task is not None:
+            voice_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
-                await asyncio.shield(launcher)
-        if child:
-            await asyncio.to_thread(stop_client, child.process)
-        if receiver:
-            receiver.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await receiver
-        writer.close()
-        with suppress(OSError):
-            await writer.wait_closed()
-        if gateway is not None:
-            await gateway.close()
-        if virtual_tunnel is not None:
-            await virtual_tunnel.close()
+                await voice_task
+        try:
+            if voice_adapter is not None:
+                with suppress(OSError, ClientLaunchError):
+                    voice_adapter.close()
+        finally:
+            # An unexpected adapter fault must still stop the owned child and
+            # close its authenticated control and optional gateway transports.
+            if child:
+                await asyncio.to_thread(stop_client, child.process)
+            if launcher:
+                # A cancelled patch-ready future can surface through the worker.
+                # It must not skip receiver, transport or owned-child cleanup.
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(launcher)
+            if child:
+                await asyncio.to_thread(stop_client, child.process)
+            if receiver:
+                receiver.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await receiver
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+            if gateway is not None:
+                await gateway.close()
+            if virtual_tunnel is not None:
+                await virtual_tunnel.close()
