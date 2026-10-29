@@ -203,9 +203,12 @@ class Coordinator:
                     kind, speaking = message.get("kind"), message.get("speaking")
                     if type(kind) is not int or kind not in (0, 4, 5) or type(speaking) is not bool:
                         raise ValueError("Invalid voice metadata report")
+                    clock_ms = message.get("clock_ms")
+                    if type(clock_ms) is not int or not 0 <= clock_ms <= (1 << 63) - 1:
+                        clock_ms = None
                     snapshot = None
                     if self.hub is not None and connection.voice_actor is not None:
-                        snapshot = await self.hub.voice_poll(connection.voice_actor, kind, speaking)
+                        snapshot = await self.hub.voice_poll(connection.voice_actor, kind, speaking, clock_ms=clock_ms)
                     await send(writer, event="voice-state", snapshot=snapshot)
                 else:
                     raise ValueError("Unexpected client launcher message")
@@ -216,6 +219,7 @@ class Coordinator:
             if connection is not None and self.hub is not None and connection.voice_actor is not None:
                 with suppress(Exception):
                     await self.hub.voice_poll(connection.voice_actor, 0, False)
+                    await self.hub.clear_party_clock(connection.voice_actor)
             if connection is not None and connection.relay is not None:
                 self.clients.pop(connection.launcher_id, None)
                 if connection.capability is not None and self.on_remote_disconnect is not None:
@@ -768,7 +772,7 @@ async def run_client(args):
     else:
         print("Connecting to the local server...", flush=True)
         reader, writer, welcome = await connect_server(args.state)
-    child = launcher = receiver = voice_task = voice_adapter = None
+    child = launcher = receiver = voice_task = voice_adapter = lobby_clock = None
     voice_snapshot, voice_received = None, 0
     tls_ready = asyncio.get_running_loop().create_future()
     loop = asyncio.get_running_loop()
@@ -798,15 +802,21 @@ async def run_client(args):
             client_arguments.append("--voiceChatServer=http://127.0.0.1:1/api2")
 
         async def voice_updates():
-            nonlocal voice_adapter
+            nonlocal voice_adapter, lobby_clock
             from .voice_native import NativeVoiceMetadata
+            from .lobby_clock import NativeLobbyClock
             await asyncio.shield(tls_ready)
             while True:
                 if child is not None and child.process.poll() is None:
                     if voice_adapter is None:
                         voice_adapter = NativeVoiceMetadata(child, args.game)
+                    if lobby_clock is None:
+                        lobby_clock = NativeLobbyClock(child, args.game)
                     snapshot = voice_snapshot if loop.time() - voice_received <= .5 else None
                     report = voice_adapter.update(snapshot) or {"kind": 0, "speaking": False}
+                    clock_ms = lobby_clock.sample()
+                    if clock_ms is not None:
+                        report["clock_ms"] = clock_ms
                     await asyncio.wait_for(send(writer, event="voice-poll", **report), .5)
                 await asyncio.sleep(.1)
 
@@ -917,6 +927,9 @@ async def run_client(args):
             if voice_adapter is not None:
                 with suppress(OSError, ClientLaunchError):
                     voice_adapter.close()
+            if lobby_clock is not None:
+                with suppress(OSError):
+                    lobby_clock.close()
         finally:
             # An unexpected adapter fault must still stop the owned child and
             # close its authenticated control and optional gateway transports.

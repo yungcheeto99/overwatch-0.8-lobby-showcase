@@ -49,8 +49,20 @@ def player_party_record(account, party_id):
             + bytes(8) + party_id + bytes(4))
 
 
+@dataclass(frozen=True)
+class PartyRosterEntry:
+    account: object
+    pending: bool = False
+    timestamp_ms: int = 0
+
+
 def party_state(party_id, accounts, leader_id):
-    """20700: Party ID followed by settled members (status 5 / Member).
+    """20700 settled-only compatibility entry point."""
+    return party_roster(party_id, (PartyRosterEntry(account) for account in accounts), leader_id)
+
+
+def party_roster(party_id, entries, leader_id):
+    """20700: ordered active members (5) and pending invitations (1).
 
     Names carry full BattleTags: the native avatar menu reuses this string
     for friend requests, while its renderer strips the discriminator.
@@ -60,18 +72,23 @@ def party_state(party_id, accounts, leader_id):
     """
     party_id = _identity(party_id, "party")
     leader_id = _identity(leader_id, "party leader")
-    accounts = tuple(accounts)
+    entries = tuple(entries)
+    accounts = tuple(entry.account for entry in entries)
     identities = [_identity(account.account_id, "party member") for account in accounts]
-    if not identities or len(set(identities)) != len(identities):
-        raise ValueError("party must contain distinct members")
-    if leader_id not in identities:
+    if not 1 <= len(identities) <= 6 or len(set(identities)) != len(identities):
+        raise ValueError("party must contain up to six distinct players")
+    if not any(identity == leader_id and not entry.pending for identity, entry in zip(identities, entries)):
         raise ValueError("party leader must be a member")
     members = []
-    for account, identity in zip(accounts, identities):
+    for entry, account, identity in zip(entries, accounts, identities):
+        if (type(entry.pending) is not bool or type(entry.timestamp_ms) is not int
+                or not 0 <= entry.timestamp_ms < 1 << 64):
+            raise ValueError("invalid party roster status or timestamp")
         _text(account.display_name, "party member name", 64)
         members.append(_text(account.battle_tag, "party member BattleTag", 128)
-                       + bytes((identity == leader_id, 5))
-                       + _portrait(getattr(account, "portrait_guid", DEFAULT_PORTRAIT)) + bytes(8)
+                       + bytes((identity == leader_id, 1 if entry.pending else 5))
+                       + _portrait(getattr(account, "portrait_guid", DEFAULT_PORTRAIT))
+                       + struct.pack("<Q", entry.timestamp_ms if entry.pending else 0)
                        + identity + identity)
     return party_id + struct.pack("<I", len(members)) + b"".join(members)
 

@@ -34,6 +34,31 @@ member requests use **20401**. The first welcome is delayed until the
 [player/party refresh](MENU_INITIALIZATION.md#player-party-and-delayed-welcome);
 pending shared messages follow it.
 
+## Pending party invitations
+
+`C988E4B3/0` (`20700`) carries a party id16 and an ordered array of rows: 
+BattleTag; leader bool; status u8; portrait u64; timestamp u64; two id16 identities. 
+Descriptor `1730F40` defines this layout.
+Status **1** selects the pending template; **5** is an accepted member
+(`DA5CD4..DA5D41`). Keep the row in place when accepting. Pending rows reserve
+display slots but grant no membership, group chat or voice access.
+
+`20702` carries party id16, inviter id16 and inviter BattleTag, without a
+timeout field. Accept/decline requests `22105/22106` return that party ID;
+`20703` clears the invitation using the same ID.
+
+Both roster and recipient progress use the original **25,000 ms** helper
+`CDA580` (recipient call `DC065F`). A separate 20-second acceptance lifetime
+has not been established. Server expiry removes the pending row and sends
+`20703`; native row removal produces the declined-invitation notification.
+
+The row timestamp uses each recipient's process-local milliseconds. Full
+snapshots overwrite it (`CDB31D/CDB321`), so repeated zero timestamps empty
+existing countdowns. Preserve a separate start timestamp per recipient across
+updates. The launcher supplies read-only frame-clock samples from double
+seconds at RVA `179F118` over its authenticated connection; the server
+translates and pins each start time with frame/transport latency precision.
+
 ## Voice preferences and channel visibility
 
 The player preferences reply **20802** (`912CEA67/2`) now enables the beta's

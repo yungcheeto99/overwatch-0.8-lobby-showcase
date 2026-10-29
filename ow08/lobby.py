@@ -98,6 +98,8 @@ class Actor:
     _voice_party_id: bytes | None = None
     _voice_expires: float = 0
     _voice_profiles: frozenset = field(default_factory=frozenset, repr=False)
+    _lobby_clock_ms: int | None = None
+    _lobby_clock_received: float = 0
     _ready: bool = False
     _active: bool = True
     _presence_status: str = "online"
@@ -865,10 +867,30 @@ class LobbyHub:
         await self.record_activity(actor)
         return await self._parties.member_action(actor, target_root, promote=True)
 
-    async def voice_poll(self, actor, kind, speaking):
+    async def report_party_clock(self, actor, clock_ms):
+        """Read-only native clock telemetry for this exact admitted connection."""
+        if type(clock_ms) is not int or not 0 <= clock_ms <= (1 << 63) - 1:
+            raise ProtocolError("invalid native lobby clock")
+        async with self._lock:
+            if (actor.synthetic or not actor._active or self._actors.get(actor.account_id) is not actor
+                    or not self.is_current(actor.lease)):
+                return False
+            if actor._lobby_clock_ms is not None and clock_ms < actor._lobby_clock_ms:
+                return False
+            actor._lobby_clock_ms, actor._lobby_clock_received = clock_ms, self.clock()
+            return True
+
+    async def clear_party_clock(self, actor):
+        async with self._lock:
+            if self._actors.get(actor.account_id) is actor and self.is_current(actor.lease):
+                actor._lobby_clock_ms, actor._lobby_clock_received = None, 0
+
+    async def voice_poll(self, actor, kind, speaking, *, clock_ms=None):
         """Authenticated hold metadata and a current Group roster; no audio."""
         if type(kind) is not int or kind not in (0, 4, 5) or type(speaking) is not bool:
             raise ProtocolError("invalid voice metadata report")
+        if clock_ms is not None:
+            await self.report_party_clock(actor, clock_ms)
         async with self._lock:
             if (not actor._active or self._actors.get(actor.account_id) is not actor
                     or not self.is_current(actor.lease)):

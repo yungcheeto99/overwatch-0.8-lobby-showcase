@@ -7,8 +7,8 @@ import secrets
 import struct
 import time
 
-from .party import (IN_PARTY, PARTY_INVITATION_SECONDS, invitation_body,
-                    party_state, player_party_record)
+from .party import (IN_PARTY, PARTY_INVITATION_SECONDS, PartyRosterEntry,
+                    invitation_body, party_roster, player_party_record)
 
 IN_PLAYER = 0x912CEA67
 IN_CHAT = 0xDBE61F10
@@ -19,6 +19,7 @@ class Party:
     identity: bytes
     members: list
     leader: object
+    roster: list = field(default_factory=list)
 
     @property
     def channel(self):
@@ -33,6 +34,7 @@ class Invitation:
     deadline: float
     nonce: bytes = field(default_factory=lambda: secrets.token_bytes(16))
     timer: asyncio.Task | None = None
+    views: dict = field(default_factory=dict)
 
 
 class Parties:
@@ -56,7 +58,7 @@ class Parties:
         identity = secrets.token_bytes(16)
         while identity == bytes(16) or identity in self.parties:
             identity = secrets.token_bytes(16)
-        party = Party(identity, [actor], actor)
+        party = Party(identity, [actor], actor, [actor])
         self.parties[identity] = party
         actor._party_id = identity
 
@@ -73,13 +75,16 @@ class Parties:
             actor._party_revision += 1
             self.dirty.add(actor)
 
-    def _cancel(self, invitation):
+    def _cancel(self, invitation, *, retain_slot=False):
         if self.invitations.get(invitation.recipient) is not invitation:
             return
         del self.invitations[invitation.recipient]
         if invitation.timer and invitation.timer is not asyncio.current_task():
             invitation.timer.cancel()
         self.clears.append((invitation.recipient, invitation.party.identity))
+        if not retain_slot:
+            invitation.party.roster.remove(invitation.recipient)
+            self._change(invitation.party)
 
     def _cancel_actor(self, actor):
         for invitation in tuple(self.invitations.values()):
@@ -88,10 +93,13 @@ class Parties:
 
     def remove_locked(self, actor):
         self._cancel_actor(actor)
+        for invitation in self.invitations.values():
+            invitation.views.pop(actor, None)
         party = self.parties.get(actor._party_id)
         if party is None or actor not in party.members:
             return
         party.members.remove(actor)
+        party.roster.remove(actor)
         actor._party_id = None
         actor._party_revision += 1
         self.dirty.discard(actor)
@@ -117,13 +125,35 @@ class Parties:
                 and self.hub.is_current(invitation.inviter.lease)
                 and self.hub.is_current(invitation.recipient.lease))
 
+    def _timestamp(self, invitation, viewer):
+        # 20700 replaces the client's local invitation clock. Pin one original
+        # process-clock origin per viewer; a later refresh must not restart it.
+        now = self.hub.clock()
+        first_seen, pinned = invitation.views.setdefault(viewer, (now, None))
+        if pinned is None and viewer._lobby_clock_ms is not None:
+            age = now - viewer._lobby_clock_received
+            if 0 <= age <= 1:
+                start = viewer._lobby_clock_ms + int((first_seen - viewer._lobby_clock_received) * 1000)
+                if 0 <= start <= (1 << 63) - 1:
+                    pinned = start
+                    invitation.views[viewer] = first_seen, pinned
+        return pinned if pinned is not None else 0
+
+    def _state(self, party, viewer):
+        entries = []
+        for actor in party.roster:
+            pending = actor not in party.members
+            invitation = self.invitations.get(actor) if pending else None
+            timestamp = self._timestamp(invitation, viewer) if invitation is not None else 0
+            entries.append(PartyRosterEntry(self.hub._profile_account(actor), pending, timestamp))
+        return party_roster(party.identity, entries, party.leader.account_id)
+
     async def view(self, actor):
         async with self.hub._lock:
             self.hub._check_locked(actor)
             party = self._party(actor)
-            accounts = [self.hub._profile_account(member) for member in party.members]
             return (party.identity, player_party_record(actor.lease.account, party.identity),
-                    party_state(party.identity, accounts, party.leader.account_id))
+                    self._state(party, actor))
 
     async def refresh(self, actor):
         """Serialize a menu refresh with membership changes, never replay solo."""
@@ -140,7 +170,9 @@ class Parties:
                 actor = self.hub._actors.get(account_id)
                 if actor is None or not actor._active or not self.hub.is_current(actor.lease):
                     return
-                self._change(self._party(actor))
+                for party in self.parties.values():
+                    if actor in party.roster:
+                        self._change(party)
             await self._publish()
 
     async def _publish(self):
@@ -155,10 +187,9 @@ class Parties:
                         continue
                     party = self._party(actor)
                     group = party.channel if len(party.members) > 1 else None
-                    accounts = [self.hub._profile_account(member) for member in party.members]
                     views.append((actor, actor._party_revision, group,
                         player_party_record(actor.lease.account, party.identity),
-                        party_state(party.identity, accounts, party.leader.account_id)))
+                        self._state(party, actor)))
             if not clears and not views:
                 return
             for actor, identity in clears:
@@ -208,16 +239,19 @@ class Parties:
                     error = None
                 elif self._party(actor).leader is not actor:
                     error = 'Only the party leader can invite players.'
-                elif len(self._party(actor).members) >= 6:
+                elif len(self._party(actor).roster) >= 6 and target not in self._party(actor).roster:
                     error = 'The party is full.'
                 else:
                     party = self._party(actor)
                     old = self.invitations.get(target)
                     if old:
-                        self._cancel(old)
+                        self._cancel(old, retain_slot=old.party is party)
                     invitation = Invitation(actor, target, party, self.clock() + self.invitation_seconds)
                     self.invitations[target] = invitation
                     invitation.timer = asyncio.create_task(self._expire(invitation))
+                    if target not in party.roster:
+                        party.roster.append(target)
+                    self._change(party)
                     error = None
             await self._publish()
             if error:
@@ -260,10 +294,12 @@ class Parties:
                     success = False
                 else:
                     party = invitation.party
+                    self._cancel(invitation, retain_slot=True)
                     self._detach(actor)
                     solo = self._party(actor)
                     del self.parties[solo.identity]
-                    party.members.append(actor)
+                    position = sum(peer in party.members for peer in party.roster[:party.roster.index(actor)])
+                    party.members.insert(position, actor)
                     actor._party_id = party.identity
                     self._change(party)
                     success = True
@@ -274,7 +310,7 @@ class Parties:
         async with self.events:
             async with self.hub._lock:
                 self.hub._check_locked(actor)
-                if len(self._party(actor).members) == 1:
+                if len(self._party(actor).roster) == 1:
                     return False
                 self._detach(actor)
             await self._publish()
@@ -287,9 +323,14 @@ class Parties:
                 party = self._party(actor)
                 target = self.hub._actors.get(target_id)
                 if (party.leader is not actor or target is None or target is actor
-                        or target not in party.members or not self.hub.is_current(target.lease)):
+                        or target not in party.roster or not self.hub.is_current(target.lease)):
                     return False
-                if promote:
+                if target not in party.members:
+                    invitation = self.invitations.get(target)
+                    if promote or invitation is None or invitation.party is not party:
+                        return False
+                    self._cancel(invitation)
+                elif promote:
                     self._cancel_actor(actor)
                     party.leader = target
                     self._change(party)
